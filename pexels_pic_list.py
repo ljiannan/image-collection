@@ -2,10 +2,10 @@ import time
 from urllib.parse import unquote, urlsplit, parse_qs
 import requests
 import os
-import mysql.connector
 import logging
 from urllib.parse import unquote
 from datetime import datetime
+import threading
 
 
 headers = {
@@ -41,81 +41,57 @@ print(f"{'*' * 40}\n")
 # ===================== 配置区域 =====================
 # 更新为六大类关键词 (人物/动物/植物/建筑/食物/交通工具)
 keywords = [
-    # People
-    # "man", "woman", "child", "baby", "teenager",
-    # "elderly", "couple", "family", "friends", "crowd",
-    # "athlete", "actor", "actress", "teacher", "doctor",
-    # "scientist", "artist", "pilot", "waiter", "nurse",
-
-    # Animals
-    # "dog", "cat", "elephant", "lion", "tiger",
-    # "giraffe", "monkey", "kangaroo", "panda", "koala",
-    # "bird", "fish", "dolphin", "whale", "snake",
-    # "crocodile", "horse", "sheep", "cow", "rabbit",
-
-    # Plants
-    # "flower", "tree", "leaf", "grass", "forest",
-    # "garden", "cactus", "succulent", "bonsai", "orchid",
-    # "rose", "lily", "sunflower", "tulip", "daffodil",
-    # "fern", "bamboo", "mushroom", "aloe", "ivy",
-
-    # Buildings
-    # "building", "skyscraper", "house", "castle", "bridge",
-    # "temple", "church", "mosque", "office", "mall",
-    # "school", "hospital", "library", "museum", "theater",
-    # "factory", "warehouse", "stadium", "tower", "lighthouse",
-
-    # Foods
-    # "pizza", "hamburger", "noodles", "rice", "sushi",
-    # "cake", "ice - cream", "chocolate", "salad", "sandwich",
-    # "steak", "fish and chips", "pasta", "dumplings", "baozi",
-    # "soup", "dessert", "fruit", "vegetable", "seafood",
-
-    # Vehicles
-    # "car", "bus", "train", "plane", "ship",
-    # "bicycle", "motorcycle", "truck", "subway", "helicopter",
-    # "tractor", "fire truck", "ambulance", "taxi", "ferry",
-    # "hot - air balloon", "spacecraft", "rocket", "scooter", "skateboard"
-    # 植物笼统概括关键词
-    # "plant", "flora", "vegetation"
-    # ... existing code ...
-    # 原有的其他类别关键词...
-    # 新增建筑相关笼统关键词
-    "architecture",
-    "historic architecture",
-    "modern architecture",
-    "contemporary architecture",
-    "urban architecture",
-    "rural architecture",
-    "residential architecture",
-    "commercial architecture",
-    "public architecture",
-    "sacred architecture",
-    "landmark building",
-    "iconic architecture",
-    "architectural complex",
-    "skyscraper cluster",
-    "old building",
-    "new building",
-    "tall building",
-    "low-rise building",
-    "unique architecture",
-    "stunning architecture"
-# ... existing code ...
+    "landscape", "nature", "scenery", "mountain", "river", "lake", "waterfall", "forest", "valley", "canyon", "desert", "meadow", "hill", "sunrise", "sunset", "sea", "ocean", "beach", "coast", "island", "cliff", "glacier", "volcano", "prairie", "field", "stream", "creek", "woods", "jungle", "bay", "fjord", "tundra", "savanna", "oasis", "plateau",
 ]
-out_path = fr"E:\pix 4.2图片下载\建筑"  # 图片保存路径
+out_path = fr"D:\pexels图片下载\自然风光"
 
 page_start= 1  # 开始页数
 page_add = 200
-mysql_config = {
-    'user': 'root',
-    'password': 'zq828079',
-    'host': '192.168.10.70',
-    'database': 'data_sql'
-}
+links_record_file = "downloaded_links.txt"  # 已下载链接记录文件
 
 # ===================================================
 
+# ===================== 已下载链接管理 =====================
+def load_downloaded_links():
+    """读取已下载链接集合"""
+    if not os.path.exists(links_record_file):
+        return set()
+    with open(links_record_file, 'r', encoding='utf-8') as f:
+        return set(line.strip() for line in f if line.strip())
+
+def append_downloaded_link(link, lock=None):
+    """将新下载链接追加到文件（线程安全）"""
+    if lock:
+        with lock:
+            with open(links_record_file, 'a', encoding='utf-8') as f:
+                f.write(link + '\n')
+    else:
+        with open(links_record_file, 'a', encoding='utf-8') as f:
+            f.write(link + '\n')
+# ===================================================
+
+# ===================== 关键词进度管理 =====================
+def get_progress_file(keyword):
+    """获取关键词对应的进度文件名"""
+    return f"progress_{keyword}.txt"
+
+def load_last_page(keyword):
+    """读取关键词上次下载到的最大页码"""
+    progress_file = get_progress_file(keyword)
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                return int(f.read().strip())
+        except Exception:
+            return 0
+    return 0
+
+def save_last_page(keyword, page_num):
+    """保存关键词最新下载到的页码"""
+    progress_file = get_progress_file(keyword)
+    with open(progress_file, 'w', encoding='utf-8') as f:
+        f.write(str(page_num))
+# ===================================================
 
 # ===================== 日志配置 =====================
 log_format = '%(asctime)s - %(levelname)s - %(message)s'
@@ -129,24 +105,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 # ===================================================
-
-
-def create_table(cursor):
-    """创建数据库表"""
-    try:
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS pexels_pic (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                image_name VARCHAR(255) NOT NULL,
-                category VARCHAR(50) DEFAULT NULL,
-                description TEXT,
-                download_link VARCHAR(255) UNIQUE
-            )
-        """)
-        logger.info("数据库表创建/验证成功")
-    except Exception as e:
-        logger.error(f"数据库表创建失败: {str(e)}")
-        raise
 
 
 def get_filename_from_url(url):
@@ -201,20 +159,8 @@ def download_image(url, save_path):
         return False
 
 
-def get_existing_links():
-    """获取数据库中已存在的所有下载链接"""
-    try:
-        with mysql.connector.connect(**mysql_config) as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT download_link FROM pexels_pic")
-                return {link[0] for link in cursor.fetchall()}
-    except Exception as e:
-        logger.error(f"获取已存在链接失败: {str(e)}")
-        return set()
-
-
-def process_page(page_num, keyword,existing_links):
-    """处理单个页面（新增existing_links参数）"""
+def process_page(page_num, keyword, downloaded_links, lock=None):
+    """处理单个页面（断点续传+本地去重）"""
     logger.info(f"{'=' * 30} 开始处理{keyword}第 {page_num} 页 {'=' * 30}")
     url = f"https://www.pexels.com/en-us/api/v3/search/photos?query={keyword}&page={page_num}&per_page=24&orientation=all&size=all&color=all&sort=popular&seo_tags=true"
     output_path=os.path.join(out_path,f'{keyword}')
@@ -224,95 +170,60 @@ def process_page(page_num, keyword,existing_links):
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.error(f"页面请求失败: {str(e)}")
-        return existing_links  # 返回更新后的链接集合
+        return
 
     if response.status_code == 200:
         try:
             data = response.json()
-            results = []
-            new_links = set()
-
             for idx, item in enumerate(data["data"], 1):
                 try:
                     download_link = item["attributes"]["image"]["download_link"]
-
-                    # 检查链接是否已存在
-                    if download_link in existing_links:
-                        logger.warning(f"链接重复，跳过: {download_link}")
+                    if download_link in downloaded_links:
+                        logger.info(f"链接已下载过，跳过: {download_link}")
                         continue
-
                     description = item["attributes"].get("description", "")
                     filename = get_filename_from_url(download_link)
                     save_path = os.path.join(output_path, filename)
-
-                    # 下载图片
-                    download_success = False
                     if not os.path.exists(save_path):
                         download_success = download_image(download_link, save_path)
+                        if download_success:
+                            append_downloaded_link(download_link, lock)
+                            downloaded_links.add(download_link)
+                            logger.info(f"已记录下载链接: {download_link}")
+                        else:
+                            logger.warning(f"跳过未下载文件: {filename}")
                     else:
                         logger.info(f"文件已存在: {filename}")
-                        download_success = True
-
-                    if download_success:
-                        record = (filename, keyword, description, download_link)
-                        results.append(record)
-                        new_links.add(download_link)
-                        logger.debug(f"记录添加成功: {filename}")
-                    else:
-                        logger.warning(f"跳过未下载文件: {filename}")
-
+                        append_downloaded_link(download_link, lock)
+                        downloaded_links.add(download_link)
                 except KeyError as e:
                     logger.warning(f"数据字段缺失: {str(e)}")
                     continue
-
-            if results:
-                try:
-                    with mysql.connector.connect(**mysql_config) as conn:
-                        with conn.cursor() as cursor:
-                            create_table(cursor)
-                            sql = """
-                                INSERT IGNORE INTO pexels_pic 
-                                (image_name, category, description, download_link)
-                                VALUES (%s, %s, %s, %s)
-                            """
-                            cursor.executemany(sql, results)
-                            conn.commit()
-                            inserted = cursor.rowcount
-                            existing_links.update(new_links)  # 更新已存在链接集合
-                            logger.info(f"成功插入 {inserted} 条记录")
-                except mysql.connector.Error as e:
-                    logger.error(f"数据库操作失败: {str(e)}")
-            else:
-                logger.warning("当前页面没有有效数据")
-
         except ValueError:
             logger.error("JSON解析失败")
     else:
         logger.error(f"请求失败 HTTP {response.status_code}")
 
-    return existing_links  # 返回更新后的链接集合
-
-
 # ===================== 主程序 =====================
 if __name__ == "__main__":
     os.makedirs(out_path, exist_ok=True)
     logger.info(f"输出目录已准备: {out_path}")
-
+    # 加载已下载链接
+    downloaded_links = load_downloaded_links()
+    logger.info(f"已加载 {len(downloaded_links)} 条已下载链接")
+    lock = threading.Lock()
     try:
-        # 初始化时获取所有已存在的链接
-        existing_links = get_existing_links()
-        logger.info(f"已加载 {len(existing_links)} 条历史记录")
         for keyword in keywords:
-            for page_num in range(page_start, page_start+page_add):
-                existing_links = process_page(page_num, keyword,existing_links)
-
-                # 添加适当延迟
+            last_page = load_last_page(keyword)
+            logger.info(f"关键词[{keyword}]上次下载到第 {last_page} 页，将从第 {last_page+1} 页开始")
+            for page_num in range(max(page_start, last_page+1), page_start+page_add):
+                process_page(page_num, keyword, downloaded_links, lock)
+                save_last_page(keyword, page_num)
                 if page_num % 5 == 0:
                     logger.info(f"已完成 {page_num} 页，暂停5秒...")
                     time.sleep(5)
                 else:
                     time.sleep(1)
-
     except KeyboardInterrupt:
         logger.warning("用户中断操作！")
     except Exception as e:
